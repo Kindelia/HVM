@@ -20,16 +20,43 @@ pub struct RuleBook {
   pub ctr_is_cal: HashMap<String, bool>,
 }
 
+pub fn get_builtin_ctr(ctr: &str) -> u64 {
+  BUILTIN_NAMES
+    .iter()
+    .enumerate()
+    .find_map(|(id, builtin_ctr)| if *builtin_ctr == ctr { Some(id as u64) } else { None })
+    .unwrap_or_else(|| panic!("{} is not a builtin constructor!", ctr))
+}
+
 pub type RuleGroup = (usize, Vec<lang::Rule>);
+
+// If you change the order of these, also change any occurances in runtime.c
+pub const BUILTIN_NAMES: &[&str] = &["StrNil", "StrCons"];
 
 // Creates an empty rulebook
 pub fn new_rulebook() -> RuleBook {
-  RuleBook {
+  let mut rb = RuleBook {
     rule_group: HashMap::new(),
     name_count: 0,
     name_to_id: HashMap::new(),
     id_to_name: HashMap::new(),
     ctr_is_cal: HashMap::new(),
+  };
+  for ctr in BUILTIN_NAMES {
+    let id = rb.name_count;
+    rb.name_count += 1;
+    rb.name_to_id.insert(ctr.to_string(), id);
+    rb.id_to_name.insert(id, ctr.to_string());
+  }
+  rb
+}
+
+fn register_name(book: &mut RuleBook, name: &str) {
+  let id = book.name_to_id.get(name);
+  if id.is_none() {
+    book.name_to_id.insert(name.to_string(), book.name_count);
+    book.id_to_name.insert(book.name_count, name.to_string());
+    book.name_count += 1;
   }
 }
 
@@ -57,12 +84,7 @@ pub fn add_group(book: &mut RuleBook, name: &str, group: &RuleGroup) {
         register_names(book, val1);
       }
       lang::Term::Ctr { name, args } => {
-        let id = book.name_to_id.get(name);
-        if id.is_none() {
-          book.name_to_id.insert(name.clone(), book.name_count);
-          book.id_to_name.insert(book.name_count, name.clone());
-          book.name_count += 1;
-        }
+        register_name(book, name);
         for arg in args {
           register_names(book, arg);
         }
@@ -176,7 +198,7 @@ pub fn sanitize_rule(rule: &lang::Rule) -> Result<lang::Rule, String> {
               }
             }
           }
-          lang::Term::U32 { .. } => {}
+          lang::Term::Const(lang::Const::U32 { .. }) => {}
           _ => {
             return Err("Invalid left-hand side".to_owned());
           }
@@ -304,10 +326,7 @@ pub fn sanitize_rule(rule: &lang::Rule) -> Result<lang::Rule, String> {
         let term = lang::Term::Op2 { oper: *oper, val0, val1 };
         Box::new(term)
       }
-      lang::Term::U32 { numb } => {
-        let term = lang::Term::U32 { numb: *numb };
-        Box::new(term)
-      }
+      lang::Term::Const(con) => Box::new(lang::Term::Const(con.clone())),
     };
 
     Ok(term)
@@ -448,7 +467,7 @@ mod tests {
   use core::panic;
 
   use super::{gen_rulebook, sanitize_rule};
-  use crate::language::{read_file, read_rule};
+  use crate::{language::{read_file, read_rule}, rulebook::BUILTIN_NAMES};
 
   #[test]
   fn test_sanitize_expected_code() {
@@ -534,11 +553,11 @@ mod tests {
 
     // id_to_name e name_to_id testing
     // check expected length
-    assert_eq!(rulebook.id_to_name.len(), 3);
+    assert_eq!(rulebook.id_to_name.len(), BUILTIN_NAMES.len() + 3);
     // check determinism and existence
-    assert_eq!(rulebook.id_to_name.get(&0).unwrap(), "Double");
-    assert_eq!(rulebook.id_to_name.get(&1).unwrap(), "Zero");
-    assert_eq!(rulebook.id_to_name.get(&2).unwrap(), "Succ");
+    assert_eq!(rulebook.id_to_name.get(&(BUILTIN_NAMES.len() as u64 + 0)).unwrap(), "Double");
+    assert_eq!(rulebook.id_to_name.get(&(BUILTIN_NAMES.len() as u64 + 1)).unwrap(), "Zero");
+    assert_eq!(rulebook.id_to_name.get(&(BUILTIN_NAMES.len() as u64 + 2)).unwrap(), "Succ");
     // check cohesion
     let _size = rulebook.id_to_name.len();
     for (id, name) in rulebook.id_to_name {
@@ -587,7 +606,7 @@ pub fn flatten(rules: &[lang::Rule]) -> Vec<lang::Rule> {
   }
 
   fn is_tested(term: &lang::Term) -> bool {
-    matches!(term, lang::Term::Ctr { .. } | lang::Term::U32 { .. })
+    matches!(term, lang::Term::Ctr { .. } | lang::Term::Const(lang::Const::U32 { .. }))
   }
 
   // Checks true if every time that `a` matches, `b` will match too
@@ -605,7 +624,7 @@ pub fn flatten(rules: &[lang::Rule]) -> Vec<lang::Rule> {
                 return false;
               }
             }
-            lang::Term::U32 { .. } => {
+            lang::Term::Const(_) => {
               return false;
             }
             lang::Term::Var { .. } => {
@@ -623,9 +642,9 @@ pub fn flatten(rules: &[lang::Rule]) -> Vec<lang::Rule> {
             }
             _ => {}
           },
-          lang::Term::U32 { numb: a_arg_numb } => match **b_arg {
-            lang::Term::U32 { numb: b_arg_numb } => {
-              if a_arg_numb != b_arg_numb {
+          lang::Term::Const(ref c0) => match **b_arg {
+            lang::Term::Const(ref c1) => {
+              if c0 != c1 {
                 return false;
               }
             }
@@ -667,7 +686,7 @@ pub fn flatten(rules: &[lang::Rule]) -> Vec<lang::Rule> {
                         new_arg_args.push(Box::new(lang::Term::Var { name: var_name.clone() }));
                         new_rhs_args.push(Box::new(lang::Term::Var { name: var_name.clone() }));
                       }
-                      lang::Term::U32 { .. } => {
+                      lang::Term::Const(lang::Const::U32 { .. }) => {
                         let var_name = format!(".{}", fresh(name_count));
                         new_arg_args.push(Box::new(lang::Term::Var { name: var_name.clone() }));
                         new_rhs_args.push(Box::new(lang::Term::Var { name: var_name.clone() }));
@@ -712,7 +731,7 @@ pub fn flatten(rules: &[lang::Rule]) -> Vec<lang::Rule> {
                           other_new_lhs_args.push(other_field.clone());
                         }
                       }
-                      lang::Term::U32 { .. } => {}
+                      lang::Term::Const(lang::Const::U32 { .. }) => {}
                       lang::Term::Var { .. } => {
                         other_new_lhs_args.push(other_arg.clone());
                       }

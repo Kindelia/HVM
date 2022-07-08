@@ -1,11 +1,18 @@
 use crate::parser;
 use std::fmt;
+use std::sync::Arc;
 
 // Types
 // =====
 
 // Term
 // ----
+
+#[derive(Clone, PartialEq, Debug)]
+pub enum Const {
+  U32 { numb: u32 },
+  Str { stri: Arc<str> },
+}
 
 #[derive(Clone, Debug)]
 pub enum Term {
@@ -15,7 +22,7 @@ pub enum Term {
   Lam { name: String, body: BTerm },
   App { func: BTerm, argm: BTerm },
   Ctr { name: String, args: Vec<BTerm> },
-  U32 { numb: u32 },
+  Const(Const),
   Op2 { oper: Oper, val0: BTerm, val1: BTerm },
 }
 
@@ -90,6 +97,15 @@ impl fmt::Display for Oper {
   }
 }
 
+impl fmt::Display for Const {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      Const::U32 { numb } => write!(f, "{}", numb),
+      Const::Str { stri } => write!(f, "{}", stri),
+    }
+  }
+}
+
 impl fmt::Display for Term {
   // WARN: I think this could overflow, might need to rewrite it to be iterative instead of recursive?
   // NOTE: Another issue is complexity. This function is O(N^2). Should use ropes to be linear.
@@ -122,7 +138,7 @@ impl fmt::Display for Term {
       fn go(term: &Term, text: &mut String) -> Option<()> {
         if let Term::Ctr { name, args } = term {
           if name == "StrCons" && args.len() == 2 {
-            if let Term::U32 { numb } = *args[0] {
+            if let Term::Const(Const::U32 { numb }) = *args[0] {
               text.push(std::char::from_u32(numb)?);
               go(&args[1], text)?;
             }
@@ -168,7 +184,7 @@ impl fmt::Display for Term {
 
         write!(f, "({}{})", name, args.iter().map(|x| format!(" {}", x)).collect::<String>())
       }
-      Self::U32 { numb } => write!(f, "{}", numb),
+      Self::Const(con) => write!(f, "{}", con),
       Self::Op2 { oper, val0, val1 } => write!(f, "({} {} {})", oper, val0, val1),
     }
   }
@@ -260,7 +276,7 @@ pub fn parse_app(state: parser::State) -> parser::Answer<Option<BTerm>> {
           if !args.is_empty() {
             args.into_iter().reduce(|a, b| Box::new(Term::App { func: a, argm: b })).unwrap()
           } else {
-            Box::new(Term::U32 { numb: 0 })
+            Box::new(Term::Const(Const::U32 { numb: 0 }))
           }
         }),
         state,
@@ -300,9 +316,9 @@ pub fn parse_u32(state: parser::State) -> parser::Answer<Option<BTerm>> {
     Box::new(|state| {
       let (state, numb) = parser::name1(state)?;
       if !numb.is_empty() {
-        Ok((state, Box::new(Term::U32 { numb: numb.parse::<u32>().unwrap() })))
+        Ok((state, Box::new(Term::Const(Const::U32 { numb: numb.parse::<u32>().unwrap() }))))
       } else {
-        Ok((state, Box::new(Term::U32 { numb: 0 })))
+        Ok((state, Box::new(Term::Const(Const::U32 { numb: 0 }))))
       }
     }),
     state,
@@ -386,7 +402,7 @@ pub fn parse_chr_sugar(state: parser::State) -> parser::Answer<Option<BTerm>> {
       if let Some(c) = parser::head(state) {
         let state = parser::tail(state);
         let (state, _) = parser::text("'", state)?;
-        Ok((state, Box::new(Term::U32 { numb: c as u32 })))
+        Ok((state, Box::new(Term::Const(Const::U32 { numb: c as u32 }))))
       } else {
         parser::expected("character", 1, state)
       }
@@ -405,7 +421,7 @@ pub fn parse_str_sugar(state: parser::State) -> parser::Answer<Option<BTerm>> {
     Box::new(|state| {
       let delim = parser::head(state).unwrap_or('\0');
       let state = parser::tail(state);
-      let mut chars: Vec<char> = Vec::new();
+      let mut chars = String::new();
       let mut state = state;
       loop {
         if let Some(next) = parser::head(state) {
@@ -418,12 +434,7 @@ pub fn parse_str_sugar(state: parser::State) -> parser::Answer<Option<BTerm>> {
           }
         }
       }
-      let empty = Term::Ctr { name: "StrNil".to_string(), args: Vec::new() };
-      let list = Box::new(chars.iter().rfold(empty, |t, h| Term::Ctr {
-        name: "StrCons".to_string(),
-        args: vec![Box::new(Term::U32 { numb: *h as u32 }), Box::new(t)],
-      }));
-      Ok((state, list))
+      Ok((state, Box::new(Term::Const(Const::Str { stri: Arc::from(chars) }))))
     }),
     state,
   )
